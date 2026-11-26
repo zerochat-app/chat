@@ -1,0 +1,428 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profilePath(userId) {
+      return /databases/$(database)/documents/profiles/$(userId);
+    }
+
+    function roomPath(roomId) {
+      return /databases/$(database)/documents/rooms/$(roomId);
+    }
+
+    function roomMemberPath(roomId, userId) {
+      return /databases/$(database)/documents/room_members/$(roomId + '__' + userId);
+    }
+
+    function messagePath(messageId) {
+      return /databases/$(database)/documents/messages/$(messageId);
+    }
+
+    function hasProfile() {
+      return signedIn() && exists(profilePath(request.auth.uid));
+    }
+
+    function myProfile() {
+      return get(profilePath(request.auth.uid)).data;
+    }
+
+    function activeUser() {
+      return hasProfile() && myProfile().banned == false;
+    }
+
+    function developer() {
+      return activeUser() && myProfile().role == 'developer';
+    }
+
+    function verified() {
+      return activeUser() && myProfile().role in ['verified', 'developer'];
+    }
+
+    function roomMember(roomId) {
+      return activeUser()
+        && exists(roomMemberPath(roomId, request.auth.uid))
+        && get(roomMemberPath(roomId, request.auth.uid)).data.banned == false;
+    }
+
+    function roomAdmin(roomId) {
+      return roomMember(roomId)
+        && get(roomMemberPath(roomId, request.auth.uid)).data.role in ['owner', 'admin'];
+    }
+
+    function roomOwner(roomId) {
+      return roomMember(roomId)
+        && get(roomMemberPath(roomId, request.auth.uid)).data.role == 'owner';
+    }
+
+    function roomIsPublic(roomId) {
+      return exists(roomPath(roomId)) && get(roomPath(roomId)).data.kind != 'dm';
+    }
+
+    function newlyCreatedGroupByMe(roomId) {
+      return existsAfter(roomPath(roomId))
+        && getAfter(roomPath(roomId)).data.kind == 'group'
+        && getAfter(roomPath(roomId)).data.created_by == request.auth.uid;
+    }
+
+    function newlyCreatedGroupAdminAfter(roomId) {
+      return newlyCreatedGroupByMe(roomId)
+        && existsAfter(roomMemberPath(roomId, request.auth.uid))
+        && getAfter(roomMemberPath(roomId, request.auth.uid)).data.user_id == request.auth.uid
+        && getAfter(roomMemberPath(roomId, request.auth.uid)).data.role == 'owner'
+        && getAfter(roomMemberPath(roomId, request.auth.uid)).data.banned == false;
+    }
+
+    function newlyCreatedDmByMe(roomId, targetUid) {
+      return existsAfter(roomPath(roomId))
+        && getAfter(roomPath(roomId)).data.kind == 'dm'
+        && getAfter(roomPath(roomId)).data.created_by == request.auth.uid
+        && getAfter(roomPath(roomId)).data.member_ids is list
+        && getAfter(roomPath(roomId)).data.member_ids.size() == 2
+        && getAfter(roomPath(roomId)).data.member_ids.hasAny([request.auth.uid])
+        && getAfter(roomPath(roomId)).data.member_ids.hasAny([targetUid]);
+    }
+
+    match /profiles/{userId} {
+      // Public profile fields only. Email addresses live in private_profiles.
+      allow get, list: if signedIn();
+
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.id == userId
+        && request.resource.data.role == 'user'
+        && request.resource.data.banned == false
+        && request.resource.data.name is string
+        && request.resource.data.name.size() <= 20
+        && request.resource.data.keys().hasOnly([
+          'id', 'name', 'color', 'photo', 'role', 'banned', 'online',
+          'last_seen', 'created_at', 'is_anonymous'
+        ]);
+
+      allow update: if signedIn() && (
+        (request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'color', 'photo', 'online', 'last_seen'
+          ])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() <= 20
+          && (!('photo' in request.resource.data)
+            || request.resource.data.photo == null
+            || (request.resource.data.photo is string && request.resource.data.photo.size() <= 160000)))
+        || developer()
+      );
+
+      allow delete: if developer();
+    }
+
+    match /private_profiles/{userId} {
+      // A user can write only their own email, as issued in their Firebase Auth token.
+      allow get: if signedIn() && (request.auth.uid == userId || developer());
+      allow list: if developer();
+      allow create, update: if activeUser()
+        && request.auth.uid == userId
+        && request.resource.data.email == request.auth.token.get('email', null)
+        && request.resource.data.keys().hasOnly(['email', 'updated_at']);
+      allow delete: if developer();
+    }
+
+    match /rooms/{roomId} {
+      allow get: if signedIn() && (
+        !exists(roomPath(roomId)) || resource.data.kind != 'dm' || roomMember(roomId) || developer()
+      );
+
+      // Public room directory; DMs are read only through a member's document lookup.
+      allow list: if signedIn() && (
+        developer() || resource.data.kind != 'dm'
+      );
+
+      allow create: if activeUser()
+        && request.resource.data.id == roomId
+        && request.resource.data.created_by == request.auth.uid
+        && request.resource.data.member_ids is list
+        && request.resource.data.members is list
+        && request.resource.data.member_ids.hasAny([request.auth.uid])
+        && request.resource.data.members == request.resource.data.member_ids
+        && (
+          (request.resource.data.kind == 'group'
+            && request.resource.data.member_ids.size() >= 1
+            && request.resource.data.member_ids.size() <= 51)
+          || (request.resource.data.kind == 'dm'
+            && request.resource.data.member_ids.size() == 2)
+          || (roomId == 'official' && request.resource.data.kind == 'official'
+            && request.resource.data.member_ids == [request.auth.uid]
+            && request.resource.data.name == 'ChatSpace 公式'
+            && request.resource.data.descr == '公式ルーム'
+            && request.resource.data.image_admin_only == false
+            && request.resource.data.post_admin_only == false)
+        );
+
+      allow update: if activeUser() && (
+        developer()
+        || (roomAdmin(roomId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'descr', 'image_admin_only', 'post_admin_only'
+          ]))
+        || (roomMember(roomId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'pinned_message_id', 'pinned_text'
+          ]))
+        || (roomMember(roomId)
+          && request.resource.data.last_author == request.auth.uid
+          && request.resource.data.last_message_preview is string
+          && request.resource.data.last_message_preview.size() <= 100
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'last_message_at', 'last_message_preview', 'last_author'
+          ]))
+        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'member_ids'])
+          && request.resource.data.members == request.resource.data.member_ids
+          && (
+            roomAdmin(roomId)
+            || (request.resource.data.member_ids.size() == resource.data.member_ids.size() + 1
+              && request.resource.data.member_ids.hasAll(resource.data.member_ids)
+              && request.resource.data.member_ids.hasAny([request.auth.uid])
+              && !resource.data.member_ids.hasAny([request.auth.uid])
+              && exists(roomMemberPath(roomId, request.auth.uid))
+              && get(roomMemberPath(roomId, request.auth.uid)).data.banned == false
+              && get(roomMemberPath(roomId, request.auth.uid)).data.hidden == false)
+            || (resource.data.member_ids.size() == request.resource.data.member_ids.size() + 1
+              && resource.data.member_ids.hasAll(request.resource.data.member_ids)
+              && resource.data.member_ids.hasAny([request.auth.uid])
+              && !request.resource.data.member_ids.hasAny([request.auth.uid]))
+          ))
+      );
+
+      allow delete: if developer() || (roomId != 'official' && roomAdmin(roomId));
+    }
+
+    match /room_members/{memberDocId} {
+      allow get: if signedIn() && (
+        !exists(/databases/$(database)/documents/room_members/$(memberDocId))
+        || resource.data.user_id == request.auth.uid
+        || developer()
+        || (resource.data.hidden == false && roomMember(resource.data.room_id))
+      );
+
+      allow list: if signedIn() && (
+        developer()
+        || resource.data.user_id == request.auth.uid
+        || (resource.data.hidden == false && roomMember(resource.data.room_id))
+      );
+
+      allow create: if activeUser()
+        && request.resource.data.id == memberDocId
+        && memberDocId == request.resource.data.room_id + '__' + request.resource.data.user_id
+        && request.resource.data.banned == false
+        && request.resource.data.role in ['member', 'owner']
+        && (
+          (request.resource.data.user_id == request.auth.uid
+            && request.resource.data.room_id == 'official'
+            && request.resource.data.hidden == false
+            && request.resource.data.role == 'member')
+          || (request.resource.data.user_id == request.auth.uid
+            && roomIsPublic(request.resource.data.room_id)
+            && request.resource.data.hidden == false
+            && request.resource.data.role == 'member')
+          || (request.resource.data.user_id == request.auth.uid
+            && roomIsPublic(request.resource.data.room_id)
+            && request.resource.data.hidden == true
+            && request.resource.data.role == 'member'
+            && verified())
+          || (request.resource.data.user_id == request.auth.uid
+            && newlyCreatedGroupByMe(request.resource.data.room_id)
+            && request.resource.data.hidden == false
+            && request.resource.data.role == 'owner')
+          || (request.resource.data.user_id != request.auth.uid
+            && request.resource.data.role == 'member'
+            && request.resource.data.hidden == false
+            && roomAdmin(request.resource.data.room_id))
+          || (request.resource.data.user_id != request.auth.uid
+            && request.resource.data.role == 'member'
+            && request.resource.data.hidden == false
+            && newlyCreatedGroupAdminAfter(request.resource.data.room_id))
+          || (request.resource.data.role == 'member'
+            && request.resource.data.hidden == false
+            && newlyCreatedDmByMe(request.resource.data.room_id, request.resource.data.user_id))
+        );
+
+      allow update: if activeUser() && (
+        (request.resource.data.user_id == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'muted', 'favorite', 'last_read_at'
+          ]))
+        || (request.resource.data.user_id == request.auth.uid
+          && verified()
+          && request.resource.data.hidden == false
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['hidden']))
+        || developer()
+        || (roomOwner(resource.data.room_id)
+          && request.resource.data.role in ['admin', 'member']
+          && request.resource.data.banned is bool
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role', 'banned']))
+        || (roomAdmin(resource.data.room_id)
+          && resource.data.role == 'member'
+          && request.resource.data.role == 'member'
+          && request.resource.data.banned is bool
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['banned']))
+      );
+
+      allow delete: if signedIn() && (
+        developer()
+        || !exists(roomPath(resource.data.room_id))
+        || (resource.data.user_id == request.auth.uid && resource.data.role != 'owner')
+      );
+    }
+
+    match /room_typing/{typingId} {
+      allow read: if signedIn() && roomMember(resource.data.room_id);
+      allow create: if activeUser()
+        && request.resource.data.id == typingId
+        && typingId == request.resource.data.room_id + '__' + request.auth.uid
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.typing is bool
+        && request.resource.data.updated_at is string
+        && request.resource.data.keys().hasOnly(['id', 'room_id', 'user_id', 'typing', 'updated_at'])
+        && roomMember(request.resource.data.room_id);
+      allow update: if activeUser()
+        && resource.data.user_id == request.auth.uid
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.room_id == resource.data.room_id
+        && request.resource.data.typing is bool
+        && request.resource.data.updated_at is string
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['typing', 'updated_at'])
+        && roomMember(resource.data.room_id);
+      allow delete: if signedIn() && (
+        resource.data.user_id == request.auth.uid || developer()
+      );
+    }
+
+    match /messages/{messageId} {
+      allow read: if signedIn() && (
+        developer()
+        || roomMember(resource.data.room_id)
+        || (verified() && roomIsPublic(resource.data.room_id))
+      );
+
+      allow create: if activeUser()
+        && request.resource.data.author_id == request.auth.uid
+        && request.resource.data.room_id is string
+        && roomMember(request.resource.data.room_id)
+        && exists(roomPath(request.resource.data.room_id))
+        && (
+          get(roomPath(request.resource.data.room_id)).data.kind != 'official' || verified()
+        )
+        && (
+          get(roomPath(request.resource.data.room_id)).data.post_admin_only != true
+          || roomAdmin(request.resource.data.room_id)
+          || developer()
+        )
+        && (
+          request.resource.data.kind != 'image'
+          || get(roomPath(request.resource.data.room_id)).data.image_admin_only != true
+          || roomAdmin(request.resource.data.room_id)
+          || developer()
+        )
+        && request.resource.data.kind in ['text', 'stamp', 'image', 'poll']
+        && (!('body' in request.resource.data)
+          || (request.resource.data.body is string && request.resource.data.body.size() <= 5000))
+        && (request.resource.data.kind != 'image'
+          || (request.resource.data.image_path is string && request.resource.data.image_path.size() <= 800000))
+        && (request.resource.data.kind != 'poll'
+          || (request.resource.data.poll is map
+            && request.resource.data.poll.options is list
+            && request.resource.data.poll.options.size() >= 2
+            && request.resource.data.poll.options.size() <= 6));
+
+      allow update: if activeUser()
+        && (resource.data.author_id == request.auth.uid || developer())
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'body', 'edited', 'deleted', 'image_path', 'poll'
+        ])
+        && (!('body' in request.resource.data)
+          || (request.resource.data.body is string && request.resource.data.body.size() <= 5000))
+        && (!('image_path' in request.resource.data)
+          || request.resource.data.image_path == null
+          || (request.resource.data.image_path is string && request.resource.data.image_path.size() <= 800000));
+
+      allow delete: if developer() || roomAdmin(resource.data.room_id);
+    }
+
+    match /reactions/{reactionId} {
+      allow read: if signedIn() && (developer() || roomMember(resource.data.room_id));
+      allow create: if activeUser()
+        && request.resource.data.user_id == request.auth.uid
+        && roomMember(request.resource.data.room_id)
+        && exists(messagePath(request.resource.data.message_id))
+        && get(messagePath(request.resource.data.message_id)).data.room_id == request.resource.data.room_id
+        && get(messagePath(request.resource.data.message_id)).data.kind != 'system';
+      allow update: if false;
+      allow delete: if signedIn() && (
+        developer() || resource.data.user_id == request.auth.uid || roomAdmin(resource.data.room_id)
+      );
+    }
+
+    match /message_reads/{readId} {
+      allow read: if signedIn() && (developer() || roomMember(resource.data.room_id));
+      allow create: if activeUser()
+        && request.resource.data.user_id == request.auth.uid
+        && roomMember(request.resource.data.room_id)
+        && exists(messagePath(request.resource.data.message_id))
+        && get(messagePath(request.resource.data.message_id)).data.room_id == request.resource.data.room_id
+        && get(messagePath(request.resource.data.message_id)).data.author_id != request.auth.uid;
+      allow update: if activeUser()
+        && resource.data.user_id == request.auth.uid
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read_at']);
+      allow delete: if signedIn() && (developer() || roomAdmin(resource.data.room_id));
+    }
+
+    match /poll_votes/{voteId} {
+      allow read: if signedIn() && (developer() || roomMember(resource.data.room_id));
+      allow create: if activeUser()
+        && request.resource.data.user_id == request.auth.uid
+        && roomMember(request.resource.data.room_id)
+        && exists(messagePath(request.resource.data.message_id))
+        && get(messagePath(request.resource.data.message_id)).data.room_id == request.resource.data.room_id
+        && get(messagePath(request.resource.data.message_id)).data.kind == 'poll'
+        && request.resource.data.option_idx is int
+        && request.resource.data.option_idx >= 0
+        && request.resource.data.option_idx < get(messagePath(request.resource.data.message_id)).data.poll.options.size();
+      allow update: if false;
+      allow delete: if signedIn() && (
+        developer() || resource.data.user_id == request.auth.uid || roomAdmin(resource.data.room_id)
+      );
+    }
+
+    match /saved_messages/{savedId} {
+      allow read, delete: if signedIn() && resource.data.user_id == request.auth.uid;
+      allow create: if activeUser()
+        && request.resource.data.user_id == request.auth.uid
+        && request.resource.data.message_id is string;
+      allow update: if false;
+    }
+
+    match /reports/{reportId} {
+      allow read: if developer();
+      allow create: if activeUser()
+        && request.resource.data.reporter_id == request.auth.uid
+        && roomMember(request.resource.data.room_id)
+        && exists(messagePath(request.resource.data.message_id))
+        && get(messagePath(request.resource.data.message_id)).data.room_id == request.resource.data.room_id;
+      allow update: if developer()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resolved']);
+      allow delete: if developer();
+    }
+
+    match /audit_log/{auditId} {
+      allow read: if developer();
+      allow create: if activeUser()
+        && request.resource.data.actor_id == request.auth.uid
+        && verified()
+        && request.resource.data.action is string
+        && request.resource.data.target is string;
+      allow update, delete: if false;
+    }
+  }
+}
