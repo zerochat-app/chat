@@ -1,5 +1,5 @@
-const V='zerochat-v2';
-const SHELL=['./','./index.html','./css/style.css','./js/main.js','./js/firebase.js','./js/ui.js','./js/state.js','./js/admin.js','./icon.svg','./manifest.webmanifest'];
+const V='zerochat-v3';
+const SHELL=['./','./index.html','./admin.html','./css/style.css','./css/admin.css','./js/main.js','./js/firebase.js','./js/ui.js','./js/state.js','./js/admin.js','./js/gate.js','./js/admin-page.js','./icon.svg','./manifest.webmanifest'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(V).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 // 同一オリジンのみ: ネットワーク優先、オフライン時はキャッシュ

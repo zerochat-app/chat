@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#4f7cff">
+<meta name="robots" content="noindex,nofollow">
+<title>ZeroChat 管理ダッシュボード</title>
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./css/style.css">
+<link rel="stylesheet" href="./css/admin.css">
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="admin-body">
+<div id="app"></div>
+<div id="boot">読み込み中…</div>
+<style>#boot{position:fixed;inset:0;display:grid;place-items:center;color:#4f7cff;font:700 22px sans-serif;z-index:0}#app:not(:empty)~#boot{display:none}</style>
+<script>
+window.addEventListener('error',function(e){var b=document.getElementById('boot');if(b)b.textContent='読み込みに失敗しました: '+(e.message||'')});
+</script>
+<script type="module" src="./js/admin-page.js"></script>
+</body>
+</html>

@@ -112,9 +112,25 @@ service cloud.firestore {
             || request.resource.data.photo == null
             || (request.resource.data.photo is string && request.resource.data.photo.size() <= 160000)))
         || developer()
+        // 【テスト用】admin_claims が作れた本人だけ、自分の role を developer にできる
+        || (request.auth.uid == userId
+          && resource.data.banned == false
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role'])
+          && request.resource.data.role == 'developer'
+          && exists(/databases/$(database)/documents/admin_claims/$(userId)))
       );
 
       allow delete: if developer();
+    }
+
+    // 【テスト用】管理者認証コード "admin"。本番運用前にこのブロックと上の分岐を削除してください。
+    match /admin_claims/{userId} {
+      allow get: if signedIn() && request.auth.uid == userId;
+      allow create: if activeUser()
+        && request.auth.uid == userId
+        && request.resource.data.code == 'admin'
+        && request.resource.data.keys().hasOnly(['code', 'at']);
+      allow update, delete: if false;
     }
 
     match /private_profiles/{userId} {
@@ -133,10 +149,9 @@ service cloud.firestore {
         !exists(roomPath(roomId)) || resource.data.kind != 'dm' || roomMember(roomId) || developer()
       );
 
-      // Public room directory; DMs are read only through a member's document lookup.
-      allow list: if signedIn() && (
-        developer() || resource.data.kind != 'dm'
-      );
+      // 公開のルーム一覧は廃止。一覧できるのは管理者(developer)だけ。
+      // 一般ユーザーはルームIDまたは招待リンクで参加する。
+      allow list: if signedIn() && developer();
 
       allow create: if activeUser()
         && request.resource.data.id == roomId
@@ -153,7 +168,7 @@ service cloud.firestore {
             && request.resource.data.member_ids.size() == 2)
           || (roomId == 'official' && request.resource.data.kind == 'official'
             && request.resource.data.member_ids == [request.auth.uid]
-            && request.resource.data.name == 'ChatSpace 公式'
+            && request.resource.data.name in ['ChatSpace 公式', 'ZeroChat 公式']
             && request.resource.data.descr == '公式ルーム'
             && request.resource.data.image_admin_only == false
             && request.resource.data.post_admin_only == false)
@@ -276,7 +291,7 @@ service cloud.firestore {
     }
 
     match /room_typing/{typingId} {
-      allow read: if signedIn() && roomMember(resource.data.room_id);
+      allow read: if signedIn() && (roomMember(resource.data.room_id) || developer());
       allow create: if activeUser()
         && request.resource.data.id == typingId
         && typingId == request.resource.data.room_id + '__' + request.auth.uid
