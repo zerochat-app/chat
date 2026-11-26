@@ -52,6 +52,11 @@ const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
 const rtdb = getDatabase(firebaseApp, firebaseConfig.databaseURL);
 const COLORS = ["#7c6af7", "#f472b6", "#34d399", "#fb923c", "#60a5fa", "#a78bfa", "#f59e0b", "#10b981", "#ef4444", "#06b6d4"];
+async function hashPw(rid, pw) {
+  if (!globalThis.crypto?.subtle) throw new Error("パスワード機能はHTTPSで開いたときだけ使えます");
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("zc:" + rid + ":" + pw));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 const now = () => (/* @__PURE__ */ new Date()).toISOString();
 const memberId = (rid, uid) => `${rid}__${uid}`;
 const safeId = (value) => String(value).replace(/\//g, "%2F");
@@ -541,18 +546,26 @@ async function runRpc(fn, args = {}) {
       return code;
     }
     case "join_room": {
-      const { uid: me } = await requireActive();
+      const { uid: me, profile } = await requireActive();
       const room = await getRoom(rid);
       if (!room || room.kind === "dm") throw new Error("not found");
       const existing = await getMember(rid, me);
       if (existing?.banned) throw new Error("banned");
       if (!existing) {
-        await writeMember(rid, me);
+        const needPw = !!room.has_password && profile.role !== "developer";
+        if (needPw && !args.proof) throw new Error("password");
+        try {
+          await writeMember(rid, me, room.has_password && args.proof ? { join_proof: String(args.proof) } : {});
+        } catch (e) {
+          if (needPw && String(e.code || "").includes("permission")) throw new Error("wrong password");
+          throw e;
+        }
         await changeRoomMembers(rid, [me]);
       }
       return rid;
     }
     case "leave_room": {
+      if (rid === "official") throw new Error("forbidden");
       const { uid: me } = await requireActive();
       const member = await getMember(rid, me);
       if (member && member.role !== "owner") {
@@ -662,8 +675,38 @@ async function runRpc(fn, args = {}) {
           await batch.commit();
         }
       }
+      try { await deleteDoc(doc(db, "room_secrets", safeId(rid))); } catch { }
       await deleteDoc(doc(db, "rooms", safeId(rid)));
       for (const m of memberRows.data || []) await deleteDoc(doc(db, "room_members", safeId(m.id)));
+      return null;
+    }
+    case "set_room_privacy": {
+      const { uid: me, profile } = await requireActive();
+      const room = await getRoom(rid);
+      if (!room || room.kind !== "group") throw new Error("not found");
+      const own = await getMember(rid, me);
+      if (!(profile.role === "developer" || ["owner", "admin"].includes(own?.role))) throw new Error("forbidden");
+      const roomPatch = {};
+      let joinHash;
+      if (args.join_password !== undefined) {
+        const pw = String(args.join_password || "");
+        if (pw && (pw.length < 4 || pw.length > 40)) throw new Error("short");
+        joinHash = pw ? await hashPw(rid, pw) : null;
+        roomPatch.has_password = !!pw;
+      }
+      if (args.lock !== undefined) {
+        if (args.lock) {
+          const pw = String(args.lock_password || "");
+          if (pw.length < 4 || pw.length > 40) throw new Error("short");
+          roomPatch.lock_hash = await hashPw(rid, pw);
+          roomPatch.locked = true;
+        } else {
+          roomPatch.locked = false;
+          roomPatch.lock_hash = null;
+        }
+      }
+      if (joinHash !== void 0) await setDoc(doc(db, "room_secrets", safeId(rid)), { room_id: rid, join_hash: joinHash }, { merge: true });
+      if (Object.keys(roomPatch).length) await updateDoc(doc(db, "rooms", safeId(rid)), roomPatch);
       return null;
     }
     case "set_pin": {
@@ -715,13 +758,21 @@ async function runRpc(fn, args = {}) {
       return null;
     }
     case "join_room_hidden": {
-      const { uid: me } = await requireVerified();
+      const { uid: me, profile } = await requireActive();
+      if (!["verified", "developer"].includes(profile.role)) throw new Error("forbidden");
       const room = await getRoom(rid);
       if (!room || room.kind === "dm") throw new Error("not found");
       const existing = await getMember(rid, me);
       if (existing?.banned) throw new Error("banned");
       if (!existing) {
-        await writeMember(rid, me, { hidden: true });
+        const needPw = !!room.has_password && profile.role !== "developer";
+        if (needPw && !args.proof) throw new Error("password");
+        try {
+          await writeMember(rid, me, { hidden: true, ...room.has_password && args.proof ? { join_proof: String(args.proof) } : {} });
+        } catch (e) {
+          if (needPw && String(e.code || "").includes("permission")) throw new Error("wrong password");
+          throw e;
+        }
       }
       await logAudit(me, "join_hidden", rid);
       return rid;
@@ -989,6 +1040,7 @@ const sb = {
   removeChannel: (channel) => channel?.unsubscribe?.()
 };
 export {
+  hashPw,
   auth,
   configured,
   db,

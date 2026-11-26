@@ -17,6 +17,19 @@ service cloud.firestore {
       return /databases/$(database)/documents/room_members/$(roomId + '__' + userId);
     }
 
+    function roomSecretPath(roomId) {
+      return /databases/$(database)/documents/room_secrets/$(roomId);
+    }
+
+    // 入室パスワード: room_secrets/{roomId}.join_hash が設定されている部屋は、
+    // 自分で入室するとき join_proof（SHA-256）が一致しないと room_members を作れない。
+    function joinProofOk(roomId) {
+      return !exists(roomSecretPath(roomId))
+        || get(roomSecretPath(roomId)).data.get('join_hash', null) == null
+        || request.resource.data.get('join_proof', null) == get(roomSecretPath(roomId)).data.get('join_hash', null)
+        || developer();
+    }
+
     function messagePath(messageId) {
       return /databases/$(database)/documents/messages/$(messageId);
     }
@@ -178,7 +191,8 @@ service cloud.firestore {
         developer()
         || (roomAdmin(roomId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'name', 'descr', 'image_admin_only', 'post_admin_only'
+            'name', 'descr', 'image_admin_only', 'post_admin_only',
+            'has_password', 'locked', 'lock_hash'
           ]))
         || (roomMember(roomId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
@@ -205,11 +219,17 @@ service cloud.firestore {
             || (resource.data.member_ids.size() == request.resource.data.member_ids.size() + 1
               && resource.data.member_ids.hasAll(request.resource.data.member_ids)
               && resource.data.member_ids.hasAny([request.auth.uid])
-              && !request.resource.data.member_ids.hasAny([request.auth.uid]))
+              && !request.resource.data.member_ids.hasAny([request.auth.uid])
+              && roomId != 'official')
           ))
       );
 
       allow delete: if developer() || (roomId != 'official' && roomAdmin(roomId));
+    }
+
+    // 入室パスワードのハッシュ。ルーム管理者(owner/admin)と developer だけが読み書きできる。
+    match /room_secrets/{roomId} {
+      allow read, write: if developer() || roomAdmin(roomId);
     }
 
     match /room_members/{memberDocId} {
@@ -238,10 +258,12 @@ service cloud.firestore {
             && request.resource.data.role == 'member')
           || (request.resource.data.user_id == request.auth.uid
             && roomIsPublic(request.resource.data.room_id)
+            && joinProofOk(request.resource.data.room_id)
             && request.resource.data.hidden == false
             && request.resource.data.role == 'member')
           || (request.resource.data.user_id == request.auth.uid
             && roomIsPublic(request.resource.data.room_id)
+            && joinProofOk(request.resource.data.room_id)
             && request.resource.data.hidden == true
             && request.resource.data.role == 'member'
             && verified())
@@ -286,7 +308,8 @@ service cloud.firestore {
       allow delete: if signedIn() && (
         developer()
         || !exists(roomPath(resource.data.room_id))
-        || (resource.data.user_id == request.auth.uid && resource.data.role != 'owner')
+        || (resource.data.user_id == request.auth.uid && resource.data.role != 'owner'
+          && resource.data.room_id != 'official')
       );
     }
 
@@ -326,7 +349,7 @@ service cloud.firestore {
         && roomMember(request.resource.data.room_id)
         && exists(roomPath(request.resource.data.room_id))
         && (
-          get(roomPath(request.resource.data.room_id)).data.kind != 'official' || verified()
+          get(roomPath(request.resource.data.room_id)).data.kind != 'official' || developer()
         )
         && (
           get(roomPath(request.resource.data.room_id)).data.post_admin_only != true
