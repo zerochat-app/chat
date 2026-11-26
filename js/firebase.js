@@ -104,7 +104,7 @@ async function ensureUserDocumentsOnce(user) {
     if (!officialSnap.exists()) tx.set(officialRef, {
       id: "official",
       kind: "official",
-      name: "ChatSpace 公式",
+      name: "ZeroChat 公式",
       descr: "公式ルーム",
       created_by: user.uid,
       image_admin_only: false,

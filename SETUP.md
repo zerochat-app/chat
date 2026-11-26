@@ -1,4 +1,4 @@
-# ChatSpace Firebase セットアップ
+# ZeroChat Firebase セットアップ
 
 対象 Firebase プロジェクト: `zerochat-45a93`
 
@@ -7,7 +7,7 @@
 
 ## Webアプリの公開構成
 
-このリポジトリはブラウザーで動作する ChatSpace 本体と、Firebase の設定ファイルを含みます。Windows の `.bat` や macOS の `.command` は含めていません。
+このリポジトリはブラウザーで動作する ZeroChat 本体と、Firebase の設定ファイルを含みます。Windows の `.bat` や macOS の `.command` は含めていません。
 
 - GitHub Pages: GitHub Actions が Vite で `dist/` を生成して公開します。
 - Firebase Authentication: Google、メールアドレス・パスワード、匿名ログインを Firebase Console で有効にします。

@@ -3,7 +3,7 @@ import { h, $, ico, toast, modal, confirmBox, popup, ms, fmtTime, fmtDT, fmtList
 import { S, meP, nameOf, isDev, isVerified, verifiedUid, isOnline, badge, avatar, COLORS, loadProfiles } from "./state.js";
 import { adminPanel } from "./admin.js";
 const app = $("#app");
-const VERSION = "ChatSpace Firebase 1.1";
+const VERSION = "ZeroChat 1.2";
 const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 const STAMPS = "😀 😁 😂 🤣 😊 😍 😘 😎 🤔 😴 😭 😡 🥺 😱 🤗 🙄 🥳 😇 ❤️ 💖 💕 👍 👎 👏 🙌 🙏 💪 👌 ✌️ 🤝 👋 🎉 🎂 🎁 🔥 ✨ ⭐ 🌈 💯 ✅ ❌ 🐶 🐱 🐰 🦊 🐻 🐼 🍎 🍜 🍣 🍔 🍕 🍩 ☕".split(" ");
 let rooms = {};
@@ -48,7 +48,7 @@ if (!configured) {
   app.append(h("div", { class: "login" }, h(
     "div",
     { class: "login-card" },
-    h("div", { class: "wordmark" }, "Chat", h("i", {}, "Space")),
+    h("div", { class: "wordmark" }, "Zero", h("i", {}, "Chat")),
     h("p", {}, "Firebase の設定を読み込めませんでした。src/firebase.ts の設定を確認してください。")
   )));
 } else {
@@ -122,7 +122,7 @@ function showLogin() {
   app.append(h("div", { class: "login" }, h(
     "div",
     { class: "login-card" },
-    h("div", { class: "wordmark" }, "Chat", h("i", {}, "Space")),
+    h("div", { class: "wordmark" }, "Zero", h("i", {}, "Chat")),
     h("p", { style: "color:var(--sub)" }, "友だちとすぐつながれるチャット"),
     google,
     h("div", { class: "sep" }, "または"),
@@ -176,7 +176,7 @@ async function startApp() {
       h(
         "div",
         { class: "side-head" },
-        h("div", { class: "wordmark" }, "Chat", h("i", {}, "Space")),
+        h("div", { class: "wordmark" }, "Zero", h("i", {}, "Chat")),
         h("button", { class: "icon-btn", "aria-label": "設定", onclick: settingsModal }, ico("settings"))
       ),
       h(
