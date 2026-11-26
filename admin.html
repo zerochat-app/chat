@@ -13,10 +13,9 @@
 </head>
 <body class="admin-body">
 <div id="app"></div>
-<div id="boot">読み込み中…</div>
-<style>#boot{position:fixed;inset:0;display:grid;place-items:center;color:#4f7cff;font:700 22px sans-serif;z-index:0}#app:not(:empty)~#boot{display:none}</style>
+<div id="boot"><div class="loading"><div class="ld-logo"><img src="./icon.svg" alt=""></div><div class="wordmark">Zero<i>Chat</i></div><div class="ld-bar"><i></i></div><small id="bootmsg">管理画面を読み込み中…</small></div></div>
 <script>
-window.addEventListener('error',function(e){var b=document.getElementById('boot');if(b)b.textContent='読み込みに失敗しました: '+(e.message||'')});
+window.addEventListener('error',function(e){var b=document.getElementById('bootmsg');if(b)b.textContent='読み込みに失敗しました: '+(e.message||'')});
 </script>
 <script type="module" src="./js/admin-page.js"></script>
 </body>

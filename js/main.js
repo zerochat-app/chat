@@ -1,6 +1,8 @@
 import { sb, configured, hashPw } from "./firebase.js";
-import { h, $, ico, toast, modal, confirmBox, popup, ms, fmtTime, fmtDT, fmtList } from "./ui.js";
-import { S, meP, nameOf, isDev, isVerified, verifiedUid, isOnline, badge, avatar, COLORS, loadProfiles } from "./state.js";
+import { h, $, ico, toast, modal, confirmBox, popup, ms, fmtTime, fmtDT, fmtList, loadingView, setLoading } from "./ui.js";
+import { officialView, VERSION_NO } from "./official.js";
+import { initCalls, startCall } from "./call.js";
+import { S, meP, nameOf, isDev, isVerified, verifiedUid, isOnline, badge, avatar, COLORS, loadProfiles, tempBanMs } from "./state.js";
 import { adminPanel } from "./admin.js";
 import { grantAdmin, ADMIN_PAGE } from "./gate.js";
 const app = $("#app");
@@ -32,6 +34,8 @@ function beep() {
   } catch { }
 }
 let beatNow = () => { };
+let stopCalls = null;
+let whisperTo = [];
 let newCount = 0;
 const dayLabel = (t) => {
   const d = new Date(t), n = new Date(), y = new Date(Date.now() - 864e5);
@@ -104,7 +108,7 @@ function bindKeys() {
     }
   });
 }
-const VERSION = "ZeroChat 2.0";
+const VERSION = "ZeroChat " + VERSION_NO;
 const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 const STAMPS = "😀 😁 😂 🤣 😊 😍 😘 😎 🤔 😴 😭 😡 🥺 😱 🤗 🙄 🥳 😇 ❤️ 💖 💕 👍 👎 👏 🙌 🙏 💪 👌 ✌️ 🤝 👋 🎉 🎂 🎁 🔥 ✨ ⭐ 🌈 💯 ✅ ❌ 🐶 🐱 🐰 🦊 🐻 🐼 🍎 🍜 🍣 🍔 🍕 🍩 ☕".split(" ");
 let rooms = {};
@@ -176,13 +180,11 @@ if (!configured) {
     }
   });
 }
-function loadingView() {
-  return h("div", { class: "loading" }, h("div", { class: "wordmark" }, "Zero", h("i", {}, "Chat")), h("div", { class: "spin" }), h("small", {}, "読み込み中…"));
-}
 function showLogin() {
   app.replaceChildren();
   let signup = false;
-  const err = h("div", { class: "err", role: "alert" });
+  const err = h("div", { class: "err", role: "alert" }, window.__zcNotice || "");
+  window.__zcNotice = "";
   const nameF = h("input", { class: "field", placeholder: "表示名", style: "display:none" });
   const mail = h("input", { class: "field", type: "email", placeholder: "メールアドレス", autocomplete: "email" });
   const pass = h("input", { class: "field", type: "password", placeholder: "パスワード（6文字以上）", autocomplete: "current-password" });
@@ -252,6 +254,8 @@ async function logout() {
 function teardown() {
   started = false;
   clearInterval(hb);
+  try { stopCalls?.(); } catch { }
+  stopCalls = null;
   [ch, roomsCh, profCh].forEach((c) => c && sb.removeChannel(c));
   ch = roomsCh = profCh = null;
   cur = null;
@@ -264,18 +268,19 @@ function teardown() {
 async function startApp() {
   if (started) return;
   started = true;
-  app.replaceChildren(loadingView());
+  app.replaceChildren(loadingView("プロフィールを読み込み中…"));
   await loadProfiles();
   if (!meP()) {
     await new Promise((r) => setTimeout(r, 800));
     await loadProfiles();
   }
-  if (meP()?.banned) {
-    alert("このアカウントは管理者により利用停止されています");
+  if (meP()?.banned || tempBanMs(meP()) > Date.now()) {
+    alert(meP()?.banned ? "このアカウントは管理者により利用停止されています" : "一時的に利用停止されています（解除: " + new Date(tempBanMs(meP())).toLocaleString("ja-JP") + "）");
     started = false;
     await sb.auth.signOut();
     return;
   }
+  setLoading("ルームを読み込み中…");
   app.replaceChildren(h(
     "div",
     { class: "shell" },
@@ -309,8 +314,13 @@ async function startApp() {
   profCh = sb.channel("profiles").on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, (p) => {
     if (p.eventType === "DELETE") delete S.users[p.old.id];
     else S.users[p.new.id] = p.new;
-    if (S.users[S.uid]?.banned) {
-      alert("このアカウントは管理者により利用停止されています");
+    if (p.eventType === "DELETE" && p.old.id === S.uid) {
+      alert("このアカウントは管理者により削除されました");
+      sb.auth.signOut();
+      return;
+    }
+    if (S.users[S.uid]?.banned || tempBanMs(S.users[S.uid]) > Date.now()) {
+      alert(S.users[S.uid].banned ? "このアカウントは管理者により利用停止されています" : "一時的に利用停止されました（解除: " + new Date(tempBanMs(S.users[S.uid])).toLocaleString("ja-JP") + "）");
       sb.auth.signOut();
       return;
     }
@@ -327,6 +337,7 @@ async function startApp() {
     });
   };
   beatNow = beat;
+  stopCalls = initCalls();
   beat();
   hb = setInterval(beat, 12e4);
   document.addEventListener("visibilitychange", () => {
@@ -467,7 +478,13 @@ async function openRoom(id) {
   newCount = 0;
   readMap[id] = Date.now();
   saveRead();
+  whisperTo = [];
   document.body.classList.add("in-chat");
+  if (rooms[id].kind === "official") {
+    $("#main").replaceChildren(officialView(rooms[id], () => document.body.classList.remove("in-chat")));
+    renderRooms();
+    return;
+  }
   $("#main").replaceChildren(h("div", { class: "chat-head", id: "chatHead" }), h("div", { id: "pinBar" }), h("div", { class: "msgs", id: "msgs" }), h("button", { class: "jump", id: "jump", hidden: true, onclick: () => { const b = $("#msgs"); b.scrollTo({ top: b.scrollHeight, behavior: "smooth" }); } }, ico("down", 16), h("b", {}, "最新へ")), composer());
   renderHeader();
   renderRooms();
@@ -487,14 +504,16 @@ function closeRoom() {
   renderRooms();
 }
 async function loadMessages(id) {
-  const [m, rc, rd, vt] = await Promise.all([
+  const grp = rooms[id] && !isDm(rooms[id]);
+  const [m, rc, rd, vt, wh] = await Promise.all([
     sb.from("messages").select("*").eq("room_id", id).order("created_at", { ascending: false }).limit(200),
     sb.from("reactions").select("message_id,user_id,emoji").eq("room_id", id),
     sb.from("message_reads").select("message_id,user_id,read_at").eq("room_id", id),
-    sb.from("poll_votes").select("message_id,user_id,option_idx").eq("room_id", id)
+    sb.from("poll_votes").select("message_id,user_id,option_idx").eq("room_id", id),
+    grp ? sb.from("whispers").select("*").eq("room_id", id).eq("owner_id", S.uid) : Promise.resolve({ data: [] })
   ]);
   if (cur !== id) return;
-  msgs = (m.data || []).reverse();
+  msgs = [...(m.data || []).reverse(), ...(wh.data || []).map((w) => ({ ...w, whisper: true }))].sort((a, b) => ms(a.created_at) - ms(b.created_at));
   (rc.data || []).forEach((x) => addTo(reacts, x.message_id, x.emoji, x.user_id));
   (rd.data || []).forEach((x) => {
     var _a;
@@ -529,6 +548,11 @@ function subscribeRoom(id) {
       renderMsgs(false);
     }
     renderHeader();
+  }).on("postgres_changes", { event: "INSERT", schema: "public", table: "whispers" }, (p) => {
+    if (msgs.some((x) => x.id === p.new.id)) return;
+    msgs.push({ ...p.new, whisper: true });
+    renderMsgs(p.new.author_id === S.uid);
+    if (p.new.author_id !== S.uid) { beep(); scheduleRead(); }
   }).on("postgres_changes", { event: "INSERT", schema: "public", table: "reactions", filter: `room_id=eq.${id}` }, (p) => {
     addTo(reacts, p.new.message_id, p.new.emoji, p.new.user_id);
     renderMsgs(false);
@@ -588,6 +612,10 @@ function renderHeader() {
     h("button", { class: "icon-btn back", "aria-label": "一覧に戻る", onclick: () => document.body.classList.remove("in-chat") }, ico("back")),
     avatar(other || r.created_by || r.id, roomTitle(r), true, other && isOnline(other)),
     h("div", { class: "titles" }, h("div", { class: "t" }, roomTitle(r), r.kind === "official" ? badge() : null), h("div", { class: "s" + (typingNames.length ? " typing" : "") }, sub)),
+    ...isDm(r) && other ? [
+      h("button", { class: "icon-btn", "aria-label": "音声通話", title: "音声通話", onclick: () => startCall(r.id, other, false) }, ico("phone")),
+      h("button", { class: "icon-btn", "aria-label": "ビデオ通話", title: "ビデオ通話", onclick: () => startCall(r.id, other, true) }, ico("video"))
+    ] : [],
     h("button", { class: "icon-btn", "aria-label": "検索", onclick: searchModal }, ico("search")),
     h("button", { class: "icon-btn", "aria-label": "メニュー", onclick: (e) => roomMenu(e.currentTarget) }, ico("more"))
   );
@@ -628,7 +656,71 @@ async function signed(path) {
   if (imgCache.has(path)) return imgCache.get(path);
   return "";
 }
+function whisperEl(m) {
+  const mine = m.author_id === S.uid;
+  const label = mine ? "→ " + (m.to || []).map(nameOf).join("、") + " だけに送信" : nameOf(m.author_id) + " さんからの耳打ち";
+  return h("div", { class: "msg whisper" + (mine ? " mine" : ""), "data-id": m.id },
+    !mine ? h("div", { class: "who" }, nameOf(m.author_id)) : null,
+    h("div", { class: "bubble whisperb", title: fmtDT(m.created_at) }, h("div", { class: "wlabel" }, ico("whisper", 13), label), linkify(m.body || "")),
+    h("div", { class: "info" }, fmtTime(m.created_at)));
+}
+const fmtSize = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + "MB" : Math.max(1, Math.round(n / 1024)) + "KB";
+function fileCard(m) {
+  return h("button", { class: "filecard", title: "保存する", onclick: (e) => { e.stopPropagation(); downloadFile(m); } },
+    h("span", { class: "fc-ic" }, ico("file", 24)),
+    h("span", { class: "fc-t" }, h("b", {}, m.file_name || "ファイル"), h("small", {}, fmtSize(m.file_size || 0) + " ・ タップで保存")),
+    ico("download", 20));
+}
+async function downloadFile(m) {
+  try {
+    let b64 = m.file_data;
+    if (!b64) {
+      toast("ダウンロードしています…");
+      const { data, error } = await sb.from("file_chunks").select("*").eq("message_id", m.id).eq("room_id", m.room_id);
+      if (error) throw error;
+      const parts = (data || []).sort((a, b) => a.i - b.i);
+      if (parts.length !== m.file_chunks) throw new Error("incomplete");
+      b64 = parts.map((p) => p.data).join("");
+    }
+    const blob = await (await fetch("data:" + (m.file_mime || "application/octet-stream") + ";base64," + b64)).blob();
+    const a = h("a", { href: URL.createObjectURL(blob), download: m.file_name || "file" });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  } catch (e) {
+    console.error(e);
+    toast("ファイルを取得できませんでした");
+  }
+}
+async function sendFile(file) {
+  const r = rooms[cur];
+  if (!r || !file) return;
+  if (!canPost(r)) return toast("このルームでは発言できません");
+  if (whisperTo.length) return toast("耳打ち中は文字メッセージだけ送れます。宛先を解除してください");
+  if (file.size > 4 * 1024 * 1024) return toast("ファイルは4MBまで送れます");
+  if (r.image_admin_only && !isRoomAdmin(r) && file.type.startsWith("image/")) return toast("このルームでは、画像を送れるのは管理者だけです");
+  toast("ファイルを準備しています…");
+  try {
+    const dataUrl = await blobToDataUrl(file);
+    const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+    const id = crypto.randomUUID();
+    const row = { id, kind: "file", body: "", file_name: file.name.slice(0, 120), file_mime: file.type || "application/octet-stream", file_size: file.size };
+    if (b64.length <= 800000) row.file_data = b64;
+    else {
+      const n = Math.ceil(b64.length / 700000);
+      for (let i = 0; i < n; i++) {
+        const { error } = await sb.from("file_chunks").insert({ id: id + "__" + i, message_id: id, room_id: r.id, author_id: S.uid, i, data: b64.slice(i * 700000, (i + 1) * 700000) });
+        if (error) throw error;
+      }
+      row.file_chunks = n;
+    }
+    if (!await insertMsg(row)) throw new Error("send");
+  } catch (e) {
+    console.error(e);
+    toast("ファイルを送信できませんでした");
+  }
+}
 function msgEl(m) {
+  if (m.whisper) return whisperEl(m);
   if (m.kind === "system") return h("div", { class: "sys" }, m.body);
   const r = rooms[cur];
   const mine = m.author_id === S.uid;
@@ -643,10 +735,11 @@ function msgEl(m) {
     openMsgId = openMsgId === m.id ? null : m.id;
     renderMsgs(false);
   };
-  const stamp = m.kind === "stamp" && !m.deleted, pic = m.kind === "image" && !m.deleted && m.image_path, poll = m.kind === "poll" && !m.deleted && m.poll;
+  const fileK = m.kind === "file" && !m.deleted, stamp = m.kind === "stamp" && !m.deleted, pic = m.kind === "image" && !m.deleted && m.image_path, poll = m.kind === "poll" && !m.deleted && m.poll;
   let content;
   if (m.deleted) content = "メッセージは削除されました";
   else if (poll) content = pollView(m);
+  else if (fileK) content = fileCard(m);
   else if (pic) {
     const img = h("img", { class: "pic", alt: "送信された画像", loading: "lazy", onclick: (e) => {
       e.stopPropagation();
@@ -656,7 +749,7 @@ function msgEl(m) {
     content = img;
   } else content = stamp ? m.body : linkify(m.body || "").map((x) => x).flatMap((x) => typeof x === "string" ? mentionSplit(x, r).flatMap((y) => typeof y === "string" ? fmt(y) : [y]) : [x]);
   const toMe = (m.mentions || []).includes(S.uid);
-  el.append(h("div", { class: "bubble" + (stamp ? " stamp" : "") + (pic ? " imgb" : "") + (m.deleted ? " deleted" : "") + (toMe ? " mentioned" : ""), title: fmtDT(m.created_at), onclick: toggle, ondblclick: () => { if (!m.deleted && m.kind !== "poll") react(m.id, "❤️"); } }, content));
+  el.append(h("div", { class: "bubble" + (fileK ? " filec" : "") + (stamp ? " stamp" : "") + (pic ? " imgb" : "") + (m.deleted ? " deleted" : "") + (toMe ? " mentioned" : ""), title: fmtDT(m.created_at), onclick: toggle, ondblclick: () => { if (!m.deleted && m.kind !== "poll") react(m.id, "❤️"); } }, content));
   if (!m.deleted) {
     const rc = h("div", { class: "reacts" });
     Object.entries(reacts[m.id] || {}).forEach(([e, l]) => {
@@ -1236,6 +1329,11 @@ function composer() {
     e.target.value = "";
     if (f) sendImage(f);
   } });
+  const anyFile = h("input", { type: "file", hidden: true, onchange: (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) sendFile(f);
+  } });
   const draftKey = "cs_draft_" + S.uid + "_" + cur;
   try {
     ta.value = localStorage.getItem(draftKey) || "";
@@ -1290,6 +1388,7 @@ function composer() {
     { class: "composer" },
     panel,
     h("div", { class: "replybar", id: "replyBar", hidden: true }),
+    h("div", { class: "replybar whbar", id: "whBar", hidden: true }),
     h(
       "div",
       { class: "crow" },
@@ -1301,8 +1400,11 @@ function composer() {
         if (r.image_admin_only && !isRoomAdmin(r)) return toast("このルームでは、画像を送れるのは管理者だけです");
         fileIn.click();
       } }, ico("image", 24)),
+      h("button", { class: "icon-btn", "aria-label": "ファイルを送る", title: "ファイルを送る（4MBまで）", onclick: () => anyFile.click() }, ico("paperclip", 24)),
+      !isDm(r) ? h("button", { class: "icon-btn", id: "whBtn", "aria-label": "指定した人に送る（耳打ち）", title: "指定した人だけに送る（耳打ち）", onclick: () => whisperModal(r) }, ico("whisper", 24)) : null,
       !isDm(r) ? h("button", { class: "icon-btn", "aria-label": "投票を作る", onclick: pollModal }, ico("poll", 24)) : null,
       fileIn,
+      anyFile,
       ta,
       sendBtn
     )
@@ -1312,6 +1414,41 @@ function setReply(m) {
   replyTo = { id: m.id, text: (m.kind === "image" ? "画像" : m.body || "").slice(0, 80) };
   drawReply();
   $("#msgInput")?.focus();
+}
+function drawWhisper() {
+  const bar = $("#whBar");
+  if (!bar) return;
+  bar.replaceChildren(...whisperTo.length ? [ico("whisper", 15), h("span", {}, nameListShort(whisperTo) + " だけに送信"), h("button", { class: "icon-btn", style: "width:28px;height:28px", "aria-label": "耳打ちをやめる", onclick: () => { whisperTo = []; drawWhisper(); } }, ico("x", 16))] : []);
+  bar.hidden = !whisperTo.length;
+  $("#whBtn")?.classList.toggle("on", !!whisperTo.length);
+}
+const nameListShort = (l) => l.length > 3 ? l.slice(0, 3).map(nameOf).join("、") + " ほか" + (l.length - 3) + "人" : l.map(nameOf).join("、");
+function whisperModal(r) {
+  const sel = new Set(whisperTo);
+  const list = h("div", { style: "display:grid;gap:2px;max-height:50vh;overflow-y:auto" });
+  const count = h("div", { style: "font-size:12px;color:var(--sub)" });
+  const draw = () => {
+    const arr = (r.members || []).filter((u) => u !== S.uid && S.users[u] && !S.users[u].banned);
+    count.textContent = sel.size ? sel.size + "人を選んでいます（最大10人）" : "選んだ人だけにメッセージが届きます。ほかのメンバーには見えません。";
+    list.replaceChildren(...arr.length ? arr.map((u) => h("button", { type: "button", class: "urow", onclick: () => { sel.has(u) ? sel.delete(u) : sel.size < 10 && sel.add(u); draw(); } }, avatar(u, nameOf(u), true, isOnline(u)), h("div", { class: "n" }, nameOf(u)), h("span", { style: "font-weight:700;color:var(--accent)" }, sel.has(u) ? "選択中" : ""))) : [h("div", { class: "empty" }, "ほかのメンバーがいません")]);
+  };
+  draw();
+  let close;
+  close = modal("指定した人に送る", [count, list, h("div", { style: "display:flex;gap:8px" },
+    h("button", { class: "btn ghost", onclick: () => { whisperTo = []; drawWhisper(); close(); } }, "解除"),
+    h("button", { class: "btn", style: "flex:1", onclick: () => { whisperTo = [...sel]; drawWhisper(); close(); $("#msgInput")?.focus(); } }, "決定"))]);
+}
+async function sendWhisper(text) {
+  const r = rooms[cur];
+  if (!r || !canPost(r) && r.kind === "official") return;
+  const wid = crypto.randomUUID(), to = [...whisperTo].slice(0, 10);
+  const owners = [...new Set([S.uid, ...to])];
+  const rows = owners.map((o) => ({ id: wid + "__" + o, wid, room_id: r.id, author_id: S.uid, owner_id: o, to, kind: "text", body: text.slice(0, 2000) }));
+  const { error } = await sb.from("whispers").insert(rows);
+  if (error) { console.error(error); toast("耳打ちを送信できませんでした"); return false; }
+  const mine = rows.find((x) => x.owner_id === S.uid);
+  if (mine && !msgs.some((x) => x.id === mine.id)) { msgs.push({ ...mine, whisper: true, created_at: new Date().toISOString() }); renderMsgs(true); }
+  return true;
 }
 function drawReply() {
   const bar = $("#replyBar");
@@ -1363,6 +1500,8 @@ async function send(kind, text) {
   text = String(text).trim();
   const r = rooms[cur];
   if (!text || !r) return;
+  if (whisperTo.length && kind === "text") { await sendWhisper(text); return; }
+  if (whisperTo.length) return toast("耳打ち中は文字メッセージだけ送れます。宛先を解除してください");
   const mentions = kind === "stamp" ? [] : findMentions(text, r);
   await insertMsg({ kind, body: text, mentions });
 }
@@ -1390,6 +1529,7 @@ function pollModal() {
       const question = q.value.trim(), o = opts.map((i) => i.value.trim()).filter(Boolean);
       if (!question || o.length < 2) return toast("質問と、2つ以上の選択肢を入力してください");
       close();
+      if (whisperTo.length) return toast("耳打ち中は文字メッセージだけ送れます。宛先を解除してください");
       await insertMsg({ kind: "poll", body: question, poll: { q: question, options: o, multi: multi.checked } });
     } }, "送信")
   ]);
@@ -1438,6 +1578,7 @@ async function sendImage(file) {
   const r = rooms[cur];
   if (!r || !file.type.startsWith("image/")) return toast("画像ファイルを選んでください");
   if (r.image_admin_only && !isRoomAdmin(r)) return toast("このルームでは、画像を送れるのは管理者だけです");
+  if (whisperTo.length) return toast("耳打ち中は文字メッセージだけ送れます。宛先を解除してください");
   toast("画像を準備しています…");
   try {
     const blob = await compress(file);
@@ -1515,7 +1656,7 @@ function previewModal() {
     h("button", { class: "btn", onclick: async () => {
       try {
         const d = await rpc("preview_room", { rid: code.value.trim() });
-        out.replaceChildren(...d.length ? d.map((m) => h("div", { class: "preview-message" }, h("small", {}, (m.kind === "system" ? "システム" : nameOf(m.author_id)) + " · " + fmtDT(m.created_at)), m.kind === "image" ? "[画像]" : m.deleted ? "（削除済み）" : m.body)) : [h("div", { class: "empty" }, "メッセージはありません")]);
+        out.replaceChildren(...d.length ? d.map((m) => h("div", { class: "preview-message" }, h("small", {}, (m.kind === "system" ? "システム" : nameOf(m.author_id)) + " · " + fmtDT(m.created_at)), m.kind === "image" ? "[画像]" : m.kind === "file" ? "[ファイル] " + (m.file_name || "") : m.deleted ? "（削除済み）" : m.body)) : [h("div", { class: "empty" }, "メッセージはありません")]);
       } catch (e) {
         toast(errMsg(e));
       }

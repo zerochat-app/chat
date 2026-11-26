@@ -3,6 +3,7 @@ import { h, ico } from "./ui.js";
 const S = { uid: "", email: "", users: {} };
 const meP = () => S.users[S.uid];
 const nameOf = (u) => u && S.users[u]?.name || "不明";
+const tempBanMs = (u) => u?.banned_until?.toMillis?.() || 0;
 const isDev = () => meP()?.role === "developer";
 const isVerified = () => ["verified", "developer"].includes(meP()?.role);
 const verifiedUid = (u) => ["verified", "developer"].includes(S.users[u]?.role);
@@ -37,5 +38,6 @@ export {
   loadProfiles,
   meP,
   nameOf,
+  tempBanMs,
   verifiedUid
 };

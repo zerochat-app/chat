@@ -56,8 +56,23 @@ const IC = {
   home: '<path d="M3 11 12 3l9 8v10h-6v-6H9v6H3z"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/>',
-  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6"/>'
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6"/>',
+  phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
+  phoneOff: '<path d="M10.7 13.3a16 16 0 0 0 3.9 2.8l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2v3a2 2 0 0 1-2.2 2A19.8 19.8 0 0 1 3.3 8.6 2 2 0 0 1 5.3 6.4h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1zM2 2l20 20"/>',
+  video: '<path d="m22 8-6 4 6 4z"/><rect x="2" y="6" width="14" height="12" rx="2"/>',
+  videoOff: '<path d="M16 16v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5 0h3a2 2 0 0 1 2 2v3.3l6-3.3v10M2 2l20 20"/>',
+  mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4"/>',
+  micOff: '<path d="M9 9v2a3 3 0 0 0 5.1 2.1M15 9.3V5a3 3 0 0 0-5.9-.8M19 10v1a7 7 0 0 1-.8 3.3M5 10v1a7 7 0 0 0 11 5.7M12 18v4M2 2l20 20"/>',
+  paperclip: '<path d="m21.4 11-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/>',
+  whisper: '<path d="M12 21a9 9 0 1 0-9-9c0 1.5.4 2.9 1 4l-1 5 5-1c1.1.6 2.5 1 4 1z"/><path d="M9 11h6M9 14h3"/>',
+  history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/>',
+  form: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+  trophy: '<path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/>'
 };
+function loadingView(msg = "読み込み中…") {
+  return h("div", { class: "loading" }, h("div", { class: "ld-logo" }, h("img", { src: "./icon.svg", alt: "" })), h("div", { class: "wordmark" }, "Zero", h("i", {}, "Chat")), h("div", { class: "ld-bar" }, h("i", {})), h("small", { id: "ldmsg" }, msg));
+}
+const setLoading = (t) => { const e = document.getElementById("ldmsg") || document.getElementById("bootmsg"); if (e) e.textContent = t; };
 function ico(n, s = 20) {
   const w = h("span", { class: "ico" });
   w.innerHTML = `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n] || IC.more}</svg>`;
@@ -134,6 +149,8 @@ export {
   fmtTime,
   h,
   ico,
+  loadingView,
+  setLoading,
   modal,
   ms,
   popup,

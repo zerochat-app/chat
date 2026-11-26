@@ -27,7 +27,8 @@ import {
   arrayUnion,
   arrayRemove,
   writeBatch,
-  runTransaction
+  runTransaction,
+  Timestamp
 } from "https://www.gstatic.com/firebasejs/13.4.0/firebase-firestore.js";
 import {
   getDatabase,
@@ -89,6 +90,12 @@ async function ensureUserDocumentsOnce(user) {
   const profileRef = doc(db, "profiles", user.uid);
   const profileSnap = await getDoc(profileRef);
   if (!profileSnap.exists()) {
+    const gone = await getDoc(doc(db, "deleted_users", user.uid));
+    if (gone.exists()) {
+      const err = new Error("このアカウントは管理者により削除されました");
+      err.code = "account-deleted";
+      throw err;
+    }
     const suggested = user.displayName || (user.email ? user.email.split("@")[0] : "ゲスト");
     await setDoc(profileRef, {
       id: user.uid,
@@ -168,6 +175,12 @@ const authFacade = {
         if (user) await ensureUserDocuments(user);
         callback(user ? "SIGNED_IN" : "SIGNED_OUT", user ? { user: { id: user.uid, email: user.email || null } } : null);
       } catch (error) {
+        if (error?.code === "account-deleted") {
+          window.__zcNotice = error.message;
+          try { await firebaseSignOut(auth); } catch { }
+          callback("SIGNED_OUT", null);
+          return;
+        }
         console.error("Firebase profile initialization failed:", error);
         callback(user ? "SIGNED_IN" : "SIGNED_OUT", user ? { user: { id: user.uid, email: user.email || null } } : null);
       }
@@ -370,7 +383,7 @@ class QueryBuilder {
     for (const value of list) {
       const id = documentIdFor(this.table, value);
       const row = { ...value, id: value.id || id };
-      if (this.table === "messages") row.created_at || (row.created_at = now());
+      if (["messages", "whispers", "feedback", "changelog", "file_chunks"].includes(this.table)) row.created_at || (row.created_at = now());
       if (this.table === "reports" || this.table === "audit_log") row.created_at || (row.created_at = now());
       await setDoc(doc(db, this.table, id), row);
       inserted.push(row);
@@ -411,7 +424,7 @@ async function readOne(table, id) {
   return docData(snap);
 }
 async function updateRoomPreview(message) {
-  const preview = message.kind === "image" ? "画像を送信しました" : message.kind === "poll" ? `投票: ${String(message.body || "").slice(0, 60)}` : message.kind === "stamp" ? `スタンプ ${message.body || ""}` : String(message.body || "").slice(0, 80);
+  const preview = message.kind === "image" ? "画像を送信しました" : message.kind === "file" ? "ファイルを送信しました" : message.kind === "poll" ? `投票: ${String(message.body || "").slice(0, 60)}` : message.kind === "stamp" ? `スタンプ ${message.body || ""}` : String(message.body || "").slice(0, 80);
   await updateDoc(doc(db, "rooms", safeId(message.room_id)), {
     last_message_at: message.created_at || now(),
     last_message_preview: preview,
@@ -431,7 +444,7 @@ async function requireActive() {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error("inactive");
   const profile = await getProfile(uid);
-  if (!profile || profile.banned) throw new Error("inactive");
+  if (!profile || profile.banned || profile.banned_until?.toMillis?.() > Date.now()) throw new Error("inactive");
   return { uid, profile };
 }
 async function requireDev() {
@@ -719,7 +732,7 @@ async function runRpc(fn, args = {}) {
       const message = await readOne("messages", String(args.mid || ""));
       if (!message) throw new Error("not found");
       if (message.author_id !== me && profile.role !== "developer") throw new Error("forbidden");
-      await updateDoc(doc(db, "messages", safeId(message.id)), { deleted: true, body: "(削除済み)", image_path: null, poll: null });
+      await updateDoc(doc(db, "messages", safeId(message.id)), { deleted: true, body: "(削除済み)", image_path: null, poll: null, ...message.kind === "file" ? { file_data: null } : {} });
       return null;
     }
     case "report_message": {
@@ -828,6 +841,39 @@ async function runRpc(fn, args = {}) {
       if (uid === me) throw new Error("self");
       await updateDoc(doc(db, "profiles", safeId(uid)), { banned: !!args.on_off });
       await logAudit(me, args.on_off ? "ban_user" : "unban_user", uid);
+      return null;
+    }
+    case "admin_temp_ban": {
+      const me = await requireDev();
+      if (uid === me) throw new Error("self");
+      const mins = Math.max(0, Math.min(Number(args.minutes) || 0, 60 * 24 * 365));
+      await updateDoc(doc(db, "profiles", safeId(uid)), { banned_until: mins > 0 ? Timestamp.fromMillis(Date.now() + mins * 6e4) : null, ban_reason: String(args.reason || "").slice(0, 80) });
+      await logAudit(me, mins > 0 ? "temp_ban" : "clear_temp_ban", `${uid}:${mins}m`);
+      return null;
+    }
+    case "admin_delete_account": {
+      const me = await requireDev();
+      if (uid === me) throw new Error("self");
+      const target = await getProfile(uid);
+      if (!target) throw new Error("not found");
+      await setDoc(doc(db, "deleted_users", safeId(uid)), { id: uid, name: target.name || "", by: me, at: now() });
+      const mem = await new QueryBuilder("room_members").select("*").eq("user_id", uid);
+      for (const m of mem.data || []) {
+        if (!m.hidden) { try { await updateDoc(doc(db, "rooms", safeId(m.room_id)), { members: arrayRemove(uid), member_ids: arrayRemove(uid) }); } catch { } }
+        await deleteDoc(doc(db, "room_members", safeId(m.id)));
+      }
+      const saved = await new QueryBuilder("saved_messages").select("*").eq("user_id", uid);
+      for (const s of saved.data || []) { try { await deleteDoc(doc(db, "saved_messages", safeId(s.id))); } catch { } }
+      try { await deleteDoc(doc(db, "private_profiles", safeId(uid))); } catch { }
+      await deleteDoc(doc(db, "profiles", safeId(uid)));
+      await logAudit(me, "delete_account", `${uid}:${target.name || ""}`);
+      return null;
+    }
+    case "admin_clear_room_privacy": {
+      const me = await requireDev();
+      try { await setDoc(doc(db, "room_secrets", safeId(rid)), { room_id: rid, join_hash: null }, { merge: true }); } catch { }
+      await updateDoc(doc(db, "rooms", safeId(rid)), { has_password: false, locked: false, lock_hash: null });
+      await logAudit(me, "clear_room_privacy", rid);
       return null;
     }
     case "admin_set_role": {
@@ -981,6 +1027,9 @@ class Channel {
         statusStops.forEach((unsub) => unsub());
         statusStops.clear();
       });
+    } else if (this.roomId && table === "whispers") {
+      const me = auth.currentUser?.uid;
+      if (me) attach([where("room_id", "==", this.roomId), where("owner_id", "==", me)]);
     } else if (this.roomId && ["reactions", "poll_votes"].includes(table)) {
       attach([where("room_id", "==", this.roomId)]);
     } else {

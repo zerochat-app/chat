@@ -42,8 +42,14 @@ service cloud.firestore {
       return get(profilePath(request.auth.uid)).data;
     }
 
+    // TempBAN: profiles.banned_until（Timestamp）が現在より未来の間は利用不可
+    function notTempBanned() {
+      return myProfile().get('banned_until', null) == null
+        || myProfile().banned_until < request.time;
+    }
+
     function activeUser() {
-      return hasProfile() && myProfile().banned == false;
+      return hasProfile() && myProfile().banned == false && notTempBanned();
     }
 
     function developer() {
@@ -105,6 +111,7 @@ service cloud.firestore {
       allow create: if signedIn()
         && request.auth.uid == userId
         && request.resource.data.id == userId
+        && !exists(/databases/$(database)/documents/deleted_users/$(userId))
         && request.resource.data.role == 'user'
         && request.resource.data.banned == false
         && request.resource.data.name is string
@@ -137,6 +144,14 @@ service cloud.firestore {
     }
 
     // 【テスト用】管理者認証コード "admin"。本番運用前にこのブロックと上の分岐を削除してください。
+    // 管理者が削除したアカウントの墓標。ここにある UID はプロフィールを作り直せない。
+    match /deleted_users/{userId} {
+      allow get: if signedIn() && (request.auth.uid == userId || developer());
+      allow list: if developer();
+      allow create, delete: if developer();
+      allow update: if false;
+    }
+
     match /admin_claims/{userId} {
       allow get: if signedIn() && request.auth.uid == userId;
       allow create: if activeUser()
@@ -362,11 +377,20 @@ service cloud.firestore {
           || roomAdmin(request.resource.data.room_id)
           || developer()
         )
-        && request.resource.data.kind in ['text', 'stamp', 'image', 'poll']
+        && request.resource.data.kind in ['text', 'stamp', 'image', 'poll', 'file']
         && (!('body' in request.resource.data)
           || (request.resource.data.body is string && request.resource.data.body.size() <= 5000))
         && (request.resource.data.kind != 'image'
           || (request.resource.data.image_path is string && request.resource.data.image_path.size() <= 800000))
+        && (request.resource.data.kind != 'file'
+          || (request.resource.data.file_name is string
+            && request.resource.data.file_size is int
+            && request.resource.data.file_size <= 4194304
+            && ((request.resource.data.get('file_data', null) is string
+                && request.resource.data.file_data.size() <= 820000)
+              || (request.resource.data.get('file_chunks', null) is int
+                && request.resource.data.file_chunks >= 1
+                && request.resource.data.file_chunks <= 8))))
         && (request.resource.data.kind != 'poll'
           || (request.resource.data.poll is map
             && request.resource.data.poll.options is list
@@ -376,7 +400,7 @@ service cloud.firestore {
       allow update: if activeUser()
         && (resource.data.author_id == request.auth.uid || developer())
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'body', 'edited', 'deleted', 'image_path', 'poll'
+          'body', 'edited', 'deleted', 'image_path', 'poll', 'file_data'
         ])
         && (!('body' in request.resource.data)
           || (request.resource.data.body is string && request.resource.data.body.size() <= 5000))
@@ -434,11 +458,96 @@ service cloud.firestore {
     }
 
     match /saved_messages/{savedId} {
-      allow read, delete: if signedIn() && resource.data.user_id == request.auth.uid;
+      allow read: if signedIn() && resource.data.user_id == request.auth.uid;
+      allow delete: if signedIn() && (resource.data.user_id == request.auth.uid || developer());
       allow create: if activeUser()
         && request.resource.data.user_id == request.auth.uid
         && request.resource.data.message_id is string;
       allow update: if false;
+    }
+
+    // 4MBまでのファイルは 700KB ごとに分割して保存する（800KB超のとき）
+    match /file_chunks/{chunkId} {
+      allow read: if signedIn() && (developer() || roomMember(resource.data.room_id));
+      allow create: if activeUser()
+        && request.resource.data.author_id == request.auth.uid
+        && roomMember(request.resource.data.room_id)
+        && request.resource.data.data is string
+        && request.resource.data.data.size() <= 720000
+        && request.resource.data.i is int;
+      allow update: if false;
+      allow delete: if developer() || roomAdmin(resource.data.room_id) || resource.data.author_id == request.auth.uid;
+    }
+
+    // 耳打ち: 受信者ごと（と送信者本人）に1ドキュメントずつ。owner_id 本人だけが読める。
+    match /whispers/{whisperId} {
+      allow read: if signedIn() && resource.data.owner_id == request.auth.uid;
+      allow create: if activeUser()
+        && request.resource.data.author_id == request.auth.uid
+        && roomMember(request.resource.data.room_id)
+        && request.resource.data.to is list
+        && request.resource.data.to.size() >= 1
+        && request.resource.data.to.size() <= 10
+        && (request.resource.data.owner_id == request.auth.uid
+          || request.resource.data.owner_id in request.resource.data.to)
+        && request.resource.data.body is string
+        && request.resource.data.body.size() <= 2000;
+      allow update: if false;
+      allow delete: if signedIn() && (resource.data.owner_id == request.auth.uid || developer());
+    }
+
+    // 通話のシグナリング（1対1・DMのみ）
+    match /calls/{callId} {
+      allow read: if signedIn()
+        && (resource.data.caller_id == request.auth.uid || resource.data.callee_id == request.auth.uid);
+      allow create: if activeUser()
+        && request.resource.data.caller_id == request.auth.uid
+        && request.resource.data.status == 'ringing'
+        && request.resource.data.kind in ['audio', 'video']
+        && exists(roomPath(request.resource.data.room_id))
+        && get(roomPath(request.resource.data.room_id)).data.kind == 'dm'
+        && get(roomPath(request.resource.data.room_id)).data.member_ids.hasAll([
+          request.resource.data.caller_id, request.resource.data.callee_id
+        ]);
+      allow update: if activeUser()
+        && (resource.data.caller_id == request.auth.uid || resource.data.callee_id == request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'answer']);
+      allow delete: if signedIn()
+        && (resource.data.caller_id == request.auth.uid || resource.data.callee_id == request.auth.uid);
+    }
+
+    match /call_candidates/{candidateId} {
+      allow read: if signedIn() && resource.data.to_uid == request.auth.uid;
+      allow create: if activeUser()
+        && request.resource.data.from_uid == request.auth.uid
+        && request.resource.data.to_uid is string
+        && request.resource.data.cand is string
+        && request.resource.data.cand.size() < 4000;
+      allow update: if false;
+      allow delete: if signedIn()
+        && (resource.data.to_uid == request.auth.uid || resource.data.from_uid == request.auth.uid);
+    }
+
+    // 公式ページ: バージョン履歴（管理者だけ書ける）
+    match /changelog/{entryId} {
+      allow read: if signedIn();
+      allow create, update, delete: if developer();
+    }
+
+    // 公式ページ: フォーム（機能リクエスト・不具合・通報）
+    match /feedback/{feedbackId} {
+      allow read: if signedIn() && (developer() || resource.data.author_id == request.auth.uid);
+      allow create: if activeUser()
+        && request.resource.data.author_id == request.auth.uid
+        && request.resource.data.kind in ['feature', 'bug', 'report', 'other']
+        && request.resource.data.status == 'open'
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 60
+        && request.resource.data.body is string
+        && request.resource.data.body.size() <= 1000;
+      allow update: if developer()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reply']);
+      allow delete: if developer();
     }
 
     match /reports/{reportId} {
